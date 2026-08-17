@@ -7,7 +7,7 @@ Instructions for AI agents working in this repository.
 Before editing, read:
 
 1. `AI.md` — fast project handoff and key function map.
-2. `ARCHITECTURE.md` — extension data flow and prompt-tool design.
+2. `ARCHITECTURE.md` — extension data flow, routing headers, and telemetry design.
 3. `README.md` — user-facing behavior and commands.
 4. `CONTRIBUTING.md` — local checks and contribution rules.
 
@@ -20,14 +20,14 @@ Use this mapping:
 | Change type | Docs to update |
 |---|---|
 | User-visible command/setup/model behavior | `README.md` |
-| Provider flow, tool routing, prompt-tool logic | `ARCHITECTURE.md` |
+| Provider flow, routing headers, telemetry logic | `ARCHITECTURE.md` |
 | File layout, key function names, scan paths, pitfalls | `AI.md` |
 | Dev workflow, tests, contribution process | `CONTRIBUTING.md` |
 | Package scripts/deps | `README.md` Development section and `CONTRIBUTING.md` if relevant |
 
 Do not leave code/docs inconsistent.
 
-## Core UX Constraint
+## Core UX and Security Constraints
 
 Keep model switching normal:
 
@@ -35,22 +35,9 @@ Keep model switching normal:
 /model <model-id>
 ```
 
-Do not introduce duplicate providers or separate manual prompt-tool model lists unless user explicitly asks.
+Do not introduce duplicate providers. The default provider is `omni`, but configuration and `OMNIROUTE_PROVIDER_NAME` may override it.
 
-The provider should remain:
-
-```text
-omni
-```
-
-## Prompt Tool Constraint
-
-Chat-only models should use prompt-emulated tools automatically when:
-
-- model id/name/provider or OmniRoute `owned_by` contains `-web`
-- or raw `models.json` model entry has `tool_calling:false`
-
-Do not rely only on Pi runtime `Model` for custom metadata. Pi strips unknown fields; use raw `models.json` when needed.
+Use the host's native `openai-completions` implementation for streaming and tool calls. Scope provider hooks to the configured OmniRoute provider, preserve unrelated `models.json` entries, and never expose the API key in UI or tool details.
 
 ## Test Before Reporting Done
 
@@ -68,14 +55,16 @@ If tests cannot run, report exact command and failure.
 - Prefer small targeted edits.
 - Keep comments on non-obvious functions.
 - Preserve `/omni setup`, `/omni sync`, `/omni dashboard` behavior unless user asks to change it.
-- Keep prompt-tool format and parser docs in sync.
+- Keep routing header and telemetry behavior documented in `ARCHITECTURE.md`.
 - If adding files, update `AI.md` file map.
 
 ## Important Files
 
 | File | Why important |
 |---|---|
-| `index.ts` | Extension implementation. |
+| `shared.ts` | Shared extension implementation. |
+| `pi.ts` | Pi Coding Agent adapter. |
+| `omp.ts` | Oh My Pi adapter. |
 | `AI.md` | AI scan guide; update when project structure/function map changes. |
 | `ARCHITECTURE.md` | Data flow and tool routing docs. |
 | `README.md` | User-facing documentation. |

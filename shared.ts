@@ -30,10 +30,34 @@ export interface AgentHomeOptions {
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────
+type RoutingMode = "default" | "fast" | "balanced" | "quality" | "cheap" | "reliable" | "offline";
+type BudgetFallback = "cheapest" | "strict";
+
 interface OmniConfig {
 	serverUrl: string;
 	apiKey: string;
 	providerName: string;
+	routingMode: RoutingMode;
+	budgetUsd?: number;
+	budgetFallback: BudgetFallback;
+	compression: string;
+}
+
+interface RouteTelemetry {
+	status: number;
+	requestId?: string;
+	model?: string;
+	provider?: string;
+	decision?: string;
+	latencyMs?: string;
+	costUsd?: string;
+	tokensIn?: string;
+	tokensOut?: string;
+	cacheHit?: string;
+	fallbackAttempts?: string;
+	compression?: string;
+	version?: string;
+	receivedAt: number;
 }
 
 interface OmniApiModel {
@@ -79,10 +103,14 @@ type ProviderModelConfig = {
 const PROVIDER_API = "openai-completions";
 const AUTO_MODELS = ["auto", "auto/coding", "auto/fast", "auto/cheap", "auto/offline", "auto/smart", "auto/lkgp"];
 const EXTENSION_STATE_DIR = "omniroute-agent-extension";
+const ROUTING_MODES: RoutingMode[] = ["default", "fast", "balanced", "quality", "cheap", "reliable", "offline"];
 const DEFAULT_CONFIG: OmniConfig = {
 	serverUrl: "http://127.0.0.1:20128",
 	apiKey: "",
 	providerName: "omni",
+	routingMode: "default",
+	budgetFallback: "cheapest",
+	compression: "default",
 };
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -109,10 +137,17 @@ function normalizeServerUrl(value: string): string {
 }
 
 function sanitizeConfig(input: Partial<OmniConfig>): OmniConfig {
+	const rawMode = String(input.routingMode ?? DEFAULT_CONFIG.routingMode).toLowerCase() as RoutingMode;
+	const rawBudget = Number(input.budgetUsd);
+	const rawFallback = String(input.budgetFallback ?? DEFAULT_CONFIG.budgetFallback).toLowerCase();
 	return {
 		serverUrl: normalizeServerUrl(String(input.serverUrl || DEFAULT_CONFIG.serverUrl)),
 		apiKey: String(input.apiKey ?? ""),
 		providerName: String(input.providerName || DEFAULT_CONFIG.providerName).trim() || DEFAULT_CONFIG.providerName,
+		routingMode: ROUTING_MODES.includes(rawMode) ? rawMode : DEFAULT_CONFIG.routingMode,
+		...(Number.isFinite(rawBudget) && rawBudget > 0 ? { budgetUsd: rawBudget } : {}),
+		budgetFallback: rawFallback === "strict" ? "strict" : "cheapest",
+		compression: String(input.compression ?? DEFAULT_CONFIG.compression).trim() || DEFAULT_CONFIG.compression,
 	};
 }
 
@@ -121,6 +156,10 @@ function loadConfig(agentHome: string): OmniConfig {
 	if (process.env.OMNIROUTE_URL) env.serverUrl = process.env.OMNIROUTE_URL;
 	if (process.env.OMNIROUTE_API_KEY) env.apiKey = process.env.OMNIROUTE_API_KEY;
 	if (process.env.OMNIROUTE_PROVIDER_NAME) env.providerName = process.env.OMNIROUTE_PROVIDER_NAME;
+	if (process.env.OMNIROUTE_MODE) env.routingMode = process.env.OMNIROUTE_MODE as RoutingMode;
+	if (process.env.OMNIROUTE_BUDGET) env.budgetUsd = Number(process.env.OMNIROUTE_BUDGET);
+	if (process.env.OMNIROUTE_BUDGET_FALLBACK) env.budgetFallback = process.env.OMNIROUTE_BUDGET_FALLBACK as BudgetFallback;
+	if (process.env.OMNIROUTE_COMPRESSION) env.compression = process.env.OMNIROUTE_COMPRESSION;
 	try {
 		return sanitizeConfig({ ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(configPath(agentHome), "utf8")), ...env });
 	} catch {
@@ -352,6 +391,42 @@ function modelLines(models: ProviderModelConfig[], query = "", limit = 80): stri
 	return lines;
 }
 
+function routingSummary(config: OmniConfig): string {
+	return [
+		`mode=${config.routingMode}`,
+		`budget=${config.budgetUsd === undefined ? "off" : `$${config.budgetUsd}`}`,
+		`fallback=${config.budgetFallback}`,
+		`compression=${config.compression}`,
+	].join(", ");
+}
+
+function telemetryStatus(telemetry: RouteTelemetry, fallbackModel?: string): string {
+	const route = [telemetry.provider, telemetry.model].filter(Boolean).join("/") || fallbackModel || "response";
+	const extras = [
+		telemetry.latencyMs ? `${telemetry.latencyMs}ms` : "",
+		telemetry.costUsd ? `$${telemetry.costUsd}` : "",
+		telemetry.cacheHit === "true" || telemetry.cacheHit === "HIT" ? "cache" : "",
+	].filter(Boolean);
+	return `↗ ${route}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
+}
+
+function telemetryLines(telemetry?: RouteTelemetry): string[] {
+	if (!telemetry) return ["No OmniRoute response has been observed in this session."];
+	return [
+		`Status:      HTTP ${telemetry.status}`,
+		`Route:       ${telemetry.provider ?? "?"}/${telemetry.model ?? "?"}`,
+		`Decision:    ${telemetry.decision ?? "not reported"}`,
+		`Latency:     ${telemetry.latencyMs ? `${telemetry.latencyMs} ms` : "not reported"}`,
+		`Cost:        ${telemetry.costUsd ? `$${telemetry.costUsd}` : "not reported"}`,
+		`Tokens:      ${telemetry.tokensIn ?? "?"} in / ${telemetry.tokensOut ?? "?"} out`,
+		`Cache:       ${telemetry.cacheHit ?? "not reported"}`,
+		`Fallbacks:   ${telemetry.fallbackAttempts ?? "0"}`,
+		`Compression: ${telemetry.compression ?? "not reported"}`,
+		`Request ID:  ${telemetry.requestId ?? "not reported"}`,
+		`Version:     ${telemetry.version ?? "not reported"}`,
+	];
+}
+
 async function showStatus(ctx: any, agentHome: string, config: OmniConfig): Promise<void> {
 	const ok = await checkHealth(config);
 	const configured = existsSync(configPath(agentHome));
@@ -362,6 +437,7 @@ async function showStatus(ctx: any, agentHome: string, config: OmniConfig): Prom
 			`Server:     ${config.serverUrl}`,
 			`Provider:   ${config.providerName}`,
 			`Health:     ${ok ? "reachable" : "unreachable"}`,
+			`Routing:    ${routingSummary(config)}`,
 			`Configured: ${configured ? "yes" : "no — run /omni setup"}`,
 		].join("\n"),
 		ok ? "info" : "warning",
@@ -372,14 +448,18 @@ function helpText(): string {
 	return [
 		"OmniRoute commands",
 		"",
-		"/omni                  Status",
-		"/omni setup            Configure server URL and API key",
-		"/omni sync             Sync models to Ctrl+P / /model picker",
-		"/omni models [search]  Browse models",
-		"/omni test <model>     Smoke-test /v1/chat/completions",
-		"/omni dashboard        Show OmniRoute dashboard URL",
-		"/omni config           Show config paths and current settings",
-		"/omni help             Show this help",
+		"/omni                         Status",
+		"/omni setup                   Configure server URL and API key",
+		"/omni sync                    Sync models to Ctrl+P / /model picker",
+		"/omni models [search]         Browse models",
+		"/omni test <model>            Smoke-test /v1/chat/completions",
+		"/omni route <mode|off>        Set per-request auto-routing mode",
+		"/omni budget <usd|off> [strict|cheapest]",
+		"/omni compression <mode>      Set mode, named combo, default, or off",
+		"/omni last                    Show the latest routing telemetry",
+		"/omni dashboard               Show OmniRoute dashboard URL",
+		"/omni config                  Show paths and current settings",
+		"/omni help                    Show this help",
 	].join("\n");
 }
 
@@ -432,6 +512,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	const agentHome = resolveAgentHome(opts);
 	let config = loadConfig(agentHome);
 	let healthTimer: ReturnType<typeof setInterval> | undefined;
+	let lastTelemetry: RouteTelemetry | undefined;
 
 	async function sync(ctx?: any): Promise<number> {
 		config = loadConfig(agentHome);
@@ -443,6 +524,48 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 
 	// On load: re-register from existing models.json (no network call)
 	reloadProviderFromModelsJson(pi, agentHome, config);
+
+	// Tie Pi's conversation to OmniRoute affinity/cost logs and apply persistent
+	// request-scoped routing controls without changing the selected model.
+	pi.on("before_provider_headers", (event: any, ctx: any) => {
+		config = loadConfig(agentHome);
+		if (ctx.model?.provider !== config.providerName) return;
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		if (sessionId) event.headers["X-OmniRoute-Session-Id"] = sessionId;
+		if (config.routingMode !== "default") event.headers["X-OmniRoute-Mode"] = config.routingMode;
+		if (config.budgetUsd !== undefined) {
+			event.headers["X-OmniRoute-Budget"] = String(config.budgetUsd);
+			event.headers["X-OmniRoute-Budget-Fallback"] = config.budgetFallback;
+		}
+		if (config.compression !== "default") event.headers["X-OmniRoute-Compression"] = config.compression;
+	});
+
+	pi.on("after_provider_response", (event: any, ctx: any) => {
+		config = loadConfig(agentHome);
+		if (ctx.model?.provider !== config.providerName) return;
+		const headers = event.headers ?? {};
+		const header = (name: string): string | undefined => {
+			const value = headers[name.toLowerCase()] ?? headers[name] ?? headers[Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase()) ?? ""];
+			return value === undefined || value === null ? undefined : String(value);
+		};
+		lastTelemetry = {
+			status: Number(event.status) || 0,
+			requestId: header("x-omniroute-request-id"),
+			model: header("x-omniroute-model") ?? ctx.model?.id,
+			provider: header("x-omniroute-provider"),
+			decision: header("x-omniroute-decision"),
+			latencyMs: header("x-omniroute-latency-ms"),
+			costUsd: header("x-omniroute-response-cost"),
+			tokensIn: header("x-omniroute-tokens-in"),
+			tokensOut: header("x-omniroute-tokens-out"),
+			cacheHit: header("x-omniroute-cache-hit") ?? header("x-omniroute-cache"),
+			fallbackAttempts: header("x-omniroute-fallback-attempts"),
+			compression: header("x-omniroute-compression"),
+			version: header("x-omniroute-version"),
+			receivedAt: Date.now(),
+		};
+		ctx.ui.setStatus("omni", telemetryStatus(lastTelemetry, ctx.model?.id));
+	});
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		config = loadConfig(agentHome);
@@ -456,18 +579,29 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		if (!ok) ctx.ui.notify(`OmniRoute unreachable at ${config.serverUrl}. Run /omni sync after reconnecting.`, "warning");
 		if (healthTimer) clearInterval(healthTimer);
 		healthTimer = setInterval(async () => {
-			ctx.ui.setStatus("omni", (await checkHealth(loadConfig(agentHome))) ? undefined : "OmniRoute unreachable");
+			const healthy = await checkHealth(loadConfig(agentHome));
+			if (!healthy) {
+				ctx.ui.setStatus("omni", "OmniRoute unreachable");
+			} else if (ctx.model?.provider !== config.providerName) {
+				ctx.ui.setStatus("omni", undefined);
+			} else if (lastTelemetry) {
+				ctx.ui.setStatus("omni", telemetryStatus(lastTelemetry, ctx.model.id));
+			} else {
+				ctx.ui.setStatus("omni", `→ ${ctx.model.id}`);
+			}
 		}, 60_000);
 	});
 
 	pi.on("session_shutdown", () => {
 		if (healthTimer) clearInterval(healthTimer);
 		healthTimer = undefined;
+		lastTelemetry = undefined;
 	});
 
 	pi.on("model_select", async (event: any, ctx: any) => {
+		config = loadConfig(agentHome);
 		const id = event.model?.id;
-		if (id) ctx.ui.setStatus("omni", `→ ${id}`);
+		ctx.ui.setStatus("omni", event.model?.provider === config.providerName && id ? `→ ${id}` : undefined);
 	});
 
 	pi.registerTool({
@@ -483,10 +617,22 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 				content: [
 					{
 						type: "text" as const,
-						text: `OmniRoute ${ok ? "reachable" : "unreachable"}; configured: ${configured}; provider: ${cfg.providerName}.`,
+						text: `OmniRoute ${ok ? "reachable" : "unreachable"}; configured: ${configured}; provider: ${cfg.providerName}; ${routingSummary(cfg)}.`,
 					},
 				],
-				details: { ok, configured, serverUrl: cfg.serverUrl, providerName: cfg.providerName },
+				details: {
+					ok,
+					configured,
+					serverUrl: cfg.serverUrl,
+					providerName: cfg.providerName,
+					routing: {
+						mode: cfg.routingMode,
+						budgetUsd: cfg.budgetUsd,
+						budgetFallback: cfg.budgetFallback,
+						compression: cfg.compression,
+					},
+					lastTelemetry,
+				},
 			};
 		},
 	});
@@ -507,9 +653,9 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	});
 
 	pi.registerCommand("omni", {
-		description: "OmniRoute: /omni [setup|sync|models|test|dashboard|config|help]",
+		description: "OmniRoute: setup, sync, routing controls, and live telemetry",
 		getArgumentCompletions(prefix: string) {
-			return ["setup", "sync", "models", "test", "dashboard", "config", "help"]
+			return ["setup", "sync", "models", "test", "route", "budget", "compression", "last", "dashboard", "config", "help"]
 				.filter((v) => v.startsWith(prefix))
 				.map((v) => ({ value: v, label: v }));
 		},
@@ -548,6 +694,43 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 					return ctx.ui.notify(`Test ${model}: ${result}`, "info");
 				}
 
+				if (sub === "route") {
+					const requested = String(rest[0] ?? "").toLowerCase();
+					const mode = (requested === "off" ? "default" : requested) as RoutingMode;
+					if (!ROUTING_MODES.includes(mode)) {
+						return ctx.ui.notify(`Usage: /omni route <${ROUTING_MODES.join("|")}|off>`, "warning");
+					}
+					config = sanitizeConfig({ ...config, routingMode: mode });
+					saveConfig(agentHome, config);
+					return ctx.ui.notify(`OmniRoute routing mode: ${mode}`, "info");
+				}
+
+				if (sub === "budget") {
+					const value = String(rest[0] ?? "").toLowerCase();
+					const fallback = String(rest[1] ?? config.budgetFallback).toLowerCase();
+					if (value !== "off" && (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+						return ctx.ui.notify("Usage: /omni budget <positive-usd|off> [strict|cheapest]", "warning");
+					}
+					if (fallback !== "strict" && fallback !== "cheapest") {
+						return ctx.ui.notify("Budget fallback must be strict or cheapest.", "warning");
+					}
+					config = sanitizeConfig({ ...config, budgetUsd: value === "off" ? undefined : Number(value), budgetFallback: fallback as BudgetFallback });
+					saveConfig(agentHome, config);
+					return ctx.ui.notify(`OmniRoute budget: ${config.budgetUsd === undefined ? "off" : `$${config.budgetUsd} (${config.budgetFallback})`}`, "info");
+				}
+
+				if (sub === "compression") {
+					const mode = rest.join(" ").trim();
+					if (!mode) return ctx.ui.notify("Usage: /omni compression <mode|named-combo|default|off>", "warning");
+					config = sanitizeConfig({ ...config, compression: mode });
+					saveConfig(agentHome, config);
+					return ctx.ui.notify(`OmniRoute compression: ${config.compression}`, "info");
+				}
+
+				if (sub === "last") {
+					return ctx.ui.notify(["Latest OmniRoute route", "", ...telemetryLines(lastTelemetry)].join("\n"), lastTelemetry?.status && lastTelemetry.status >= 400 ? "warning" : "info");
+				}
+
 				if (sub === "dashboard" || sub === "dash") {
 					return ctx.ui.notify(`OmniRoute dashboard: ${config.serverUrl}`, "info");
 				}
@@ -560,6 +743,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 							`Configured: ${existsSync(configPath(agentHome)) ? "yes" : "no"}`,
 							`Server:   ${config.serverUrl}`,
 							`Provider: ${config.providerName}`,
+							`Routing:  ${routingSummary(config)}`,
 						].join("\n"),
 						"info",
 					);

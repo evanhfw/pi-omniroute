@@ -15,7 +15,10 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 - **Native tool calls** — the host's built-in `openai-completions` handler runs every request, so you get real SSE streaming and native `tool_calls` for all models.
 - **Smart sorting** — models grouped by provider prefix, auto-routing models (`auto`, `auto/coding`, etc.) always first.
 - **Health monitoring** — periodic reachability checks with status bar indicators.
-- **Env overrides** — `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, `OMNIROUTE_PROVIDER_NAME` skip the setup wizard entirely.
+- **Per-request routing controls** — choose OmniRoute mode packs, enforce a USD budget, and select compression without changing models.
+- **Session affinity** — Pi's session ID is forwarded as `X-OmniRoute-Session-Id` for sticky routing, cache affinity, and per-session cost attribution.
+- **Live route telemetry** — the status bar and `/omni last` show the actual provider/model, routing decision, latency, cost, tokens, cache hit, fallbacks, compression, and request ID reported by OmniRoute.
+- **Env overrides** — configure connection and routing behavior entirely through environment variables.
 
 ## Installation
 
@@ -64,8 +67,12 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 | `/omni sync` | Fetch `/v1/models` and register models in the picker |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
+| `/omni route <mode\|off>` | Set the per-request auto-routing mode: `fast`, `balanced`, `quality`, `cheap`, `reliable`, or `offline` |
+| `/omni budget <usd\|off> [strict\|cheapest]` | Apply a per-request cost ceiling and choose hard-fail or cheapest fallback behavior |
+| `/omni compression <mode>` | Set an OmniRoute compression mode, named compression combo, `default`, or `off` |
+| `/omni last` | Inspect telemetry from the latest OmniRoute provider response |
 | `/omni dashboard` | Show the OmniRoute dashboard URL |
-| `/omni config` | Show config and models.json paths with current settings |
+| `/omni config` | Show config/model paths and current routing controls |
 | `/omni help` | Show command list |
 
 ## Agent Tools
@@ -77,13 +84,17 @@ Two tools the LLM can call directly:
 
 ## How It Works
 
-The extension registers OmniRoute as an `openai-completions` provider. After `/omni sync`, all models appear in the picker. Every request is handled natively by the host's built-in `openai-completions` handler — real SSE streaming, native `tool_calls`, no middleware.
+The extension registers OmniRoute as an `openai-completions` provider. After `/omni sync`, all models appear in the picker. Every request is handled natively by the host's built-in `openai-completions` handler — real SSE streaming and native `tool_calls`.
+
+Before an OmniRoute request, the extension adds the Pi session ID plus any configured routing, budget, and compression headers. When OmniRoute responds, it reads the `X-OmniRoute-*` telemetry headers and updates the Pi status bar.
 
 ```text
 agent
-  -> /model codex/gpt-5.2
+  -> /model auto/coding
+  -> X-OmniRoute-Session-Id + routing controls
   -> OmniRoute /v1/chat/completions (SSE stream)
   -> token-by-token output, native tool_calls
+  -> X-OmniRoute-* route/cost/cache telemetry
   -> agent executes tools
 ```
 
@@ -103,8 +114,12 @@ auto/cheap   auto/offline   auto/smart   auto/lkgp
 | `OMNIROUTE_URL` | OmniRoute server base URL |
 | `OMNIROUTE_API_KEY` | API key |
 | `OMNIROUTE_PROVIDER_NAME` | Provider name shown in the picker (default: `omni`) |
+| `OMNIROUTE_MODE` | Routing mode: `fast`, `balanced`, `quality`, `cheap`, `reliable`, `offline`, or `default` |
+| `OMNIROUTE_BUDGET` | Positive per-request USD budget |
+| `OMNIROUTE_BUDGET_FALLBACK` | `strict` or `cheapest` |
+| `OMNIROUTE_COMPRESSION` | Compression mode, named combo, `default`, or `off` |
 
-When any of these are set, `/omni setup` is not required.
+Connection variables can skip `/omni setup`. Routing environment variables override saved settings.
 
 ## Development
 

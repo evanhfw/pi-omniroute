@@ -12,21 +12,21 @@ npm run smoke
 
 | Command | Purpose |
 |---|---|
-| `npm run typecheck` | Type-check `index.ts` with NodeNext settings. |
-| `npm run smoke` | Import the extension module and verify it loads. |
+| `npm run typecheck` | Type-check `shared.ts`, `omp.ts`, and `pi.ts` with NodeNext settings. |
+| `npm run smoke` | Import both host adapter modules and verify they load. |
 
 ## Local Pi Testing
 
 From this repo:
 
 ```bash
-pi -e ./index.ts
+pi -e ./pi.ts
 ```
 
 Or install normally:
 
 ```bash
-pi install git:github.com/md-riaz/omniroute-pi-ext-integration
+pi install git:github.com/md-riaz/omniroute-agent-extension
 ```
 
 Then in Pi:
@@ -34,7 +34,9 @@ Then in Pi:
 ```text
 /omni setup
 /omni sync
-/model cgpt-web/gpt-5.4-pro
+/model auto/coding
+/omni route fast
+/omni last
 ```
 
 ## Before Opening a PR
@@ -63,36 +65,37 @@ If changing function names or scan paths, update `AI.md` so future AI agents do 
 
 ## Coding Rules
 
-- Keep extension in `index.ts` unless feature grows enough to justify splitting files.
+- Keep host-neutral behavior in `shared.ts`; adapters should remain thin.
 - Add short comments for non-obvious functions.
-- Preserve `/model` UX; do not add duplicate providers for prompt tools.
-- Keep `omni` as provider name.
-- Keep prompt fallback automatic.
-- Avoid destructive behavior in `/omni sync`; it should only replace `config.providers.omni.models`.
+- Preserve `/model` UX; do not add duplicate providers.
+- Keep `omni` as the default provider name while respecting its config/env override.
+- Scope provider request/response hooks to the configured OmniRoute provider.
+- Never expose the API key in command output or tool details.
+- Avoid destructive behavior in `/omni sync`; it should only replace the configured provider entry.
 
 ## Testing Checklist
 
 For model sync changes:
 
 - `/omni setup` saves URL/API key.
-- `/omni sync` writes models to `~/.pi/agent/models.json`.
-- Web-synced models get `tool_calling:false` even when `-web` only appears in OmniRoute `owned_by`/provider metadata.
-- Normal models do not get forced into prompt mode.
+- `/omni sync` writes models to the correct host `models.json`.
+- Existing unrelated providers remain intact.
+- Native model streaming and tool calls still use `openai-completions`.
 
-For prompt tool changes:
+For routing/telemetry changes:
 
-- `npm run typecheck` passes.
-- `npm run smoke` passes.
-- A `tool_calling:false` model can trigger a tool call.
-- A native model still uses native tool calls.
-- Bad `<tool_call>` JSON surfaces correction text instead of silent failure.
+- Hooks ignore non-OmniRoute models.
+- Session, mode, budget, fallback, and compression headers follow config.
+- `/omni last` handles both complete and missing response headers.
+- No command, tool result, or status output exposes the API key.
+- `npm run typecheck` and `npm run smoke` pass.
 
 ## Commit Style
 
 Use descriptive commit messages. Good examples:
 
 ```text
-Add prompt-tool fallback for web-synced OmniRoute models
-Document OmniRoute prompt tool architecture
-Preserve raw tool_calling metadata during model sync
+Add per-request budget controls for OmniRoute
+Show OmniRoute response telemetry in Pi
+Preserve unrelated providers during model sync
 ```
