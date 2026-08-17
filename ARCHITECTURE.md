@@ -47,6 +47,10 @@ Pi context + tools
 
 The extension does not implement its own model stream or prompt-emulated tool protocol.
 
+## Web Search Tool
+
+The `omniroute_search` tool and `/omni search` call `POST {serverUrl}/v1/search` with a `query` and optional `max_results`, `provider`, and `search_type` (`web`/`news`) fields. The response is formatted as a numbered list of titles, URLs, and snippets. Search provider credentials and quota are managed server-side by OmniRoute; the extension never sees or forwards an API key.
+
 ## Routing Controls and Session Affinity
 
 The `before_provider_headers` hook runs only when the selected model belongs to the configured OmniRoute provider. It adds:

@@ -209,6 +209,33 @@ async function checkHealth(config: OmniConfig): Promise<boolean> {
 	}
 }
 
+interface SearchParams {
+	query: string;
+	max_results?: number;
+	provider?: string;
+	search_type?: "web" | "news";
+}
+
+async function webSearch(config: OmniConfig, params: SearchParams): Promise<any> {
+	const body: Record<string, unknown> = { query: params.query };
+	if (params.max_results) body.max_results = params.max_results;
+	if (params.provider) body.provider = params.provider;
+	if (params.search_type && params.search_type !== "web") body.search_type = params.search_type;
+	return requestJson(config, "/v1/search", { method: "POST", body: JSON.stringify(body) }, 15_000);
+}
+
+function formatSearchResults(data: any): string {
+	const items: any[] = Array.isArray(data?.results) ? data.results : [];
+	if (items.length === 0) return "No results.";
+	return [`Search: ${data.query ?? ""}`, `Provider: ${data.provider ?? "?"}`, ""].concat(
+		items.map((r, i) => {
+			const cite = r.citation?.provider ? ` [${r.citation.provider}]` : "";
+			const meta = r.published_at ? ` (${r.published_at})` : "";
+			return `${i + 1}. ${r.title ?? ""}${meta}\n   ${r.url ?? ""}\n   ${r.snippet ?? ""}${cite}`;
+		}),
+	).join("\n");
+}
+
 // ─── Model utilities ──────────────────────────────────────────────────────────
 function normalizeModalities(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -453,6 +480,7 @@ function helpText(): string {
 		"/omni sync                    Sync models to Ctrl+P / /model picker",
 		"/omni models [search]         Browse models",
 		"/omni test <model>            Smoke-test /v1/chat/completions",
+		"/omni search <query>          Web search via /v1/search",
 		"/omni route <mode|off>        Set per-request auto-routing mode",
 		"/omni budget <usd|off> [strict|cheapest]",
 		"/omni compression <mode>      Set mode, named combo, default, or off",
@@ -638,6 +666,34 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	});
 
 	pi.registerTool({
+		name: "omniroute_search",
+		label: "OmniRoute Web Search",
+		description: "Search the web via OmniRoute /v1/search (Serper, Brave, Exa, etc.).",
+		parameters: {
+			type: "object",
+			properties: {
+				query: { type: "string", description: "Search query" },
+				max_results: { type: "number", description: "1-100, default 5" },
+				provider: { type: "string", description: "Search provider id, e.g. serper-search, brave-search, exa-search, duckduckgo-free (omit for auto)" },
+				search_type: { type: "string", enum: ["web", "news"], description: "Default web" },
+			},
+			required: ["query"],
+		},
+		async execute(_id: string, params: any) {
+			const cfg = loadConfig(agentHome);
+			const query = String(params?.query ?? "").trim();
+			if (!query) return { content: [{ type: "text" as const, text: "query is required." }] };
+			const data = await webSearch(cfg, {
+				query,
+				max_results: params?.max_results,
+				provider: params?.provider,
+				search_type: params?.search_type,
+			});
+			return { content: [{ type: "text" as const, text: formatSearchResults(data) }], details: { provider: data.provider, query: data.query, count: data.results?.length ?? 0 } };
+		},
+	});
+
+	pi.registerTool({
 		name: "omniroute_sync",
 		label: "OmniRoute Sync",
 		description: "Fetch /v1/models from OmniRoute and register them as a provider.",
@@ -655,7 +711,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	pi.registerCommand("omni", {
 		description: "OmniRoute: setup, sync, routing controls, and live telemetry",
 		getArgumentCompletions(prefix: string) {
-			return ["setup", "sync", "models", "test", "route", "budget", "compression", "last", "dashboard", "config", "help"]
+			return ["setup", "sync", "models", "test", "search", "route", "budget", "compression", "last", "dashboard", "config", "help"]
 				.filter((v) => v.startsWith(prefix))
 				.map((v) => ({ value: v, label: v }));
 		},
@@ -692,6 +748,17 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 					if (!model) return ctx.ui.notify("Usage: /omni test <model>", "warning");
 					const result = await testChat(config, model);
 					return ctx.ui.notify(`Test ${model}: ${result}`, "info");
+				}
+
+				if (sub === "search") {
+					const query = rest.join(" ").trim();
+					if (!query) return ctx.ui.notify("Usage: /omni search <query>", "warning");
+					const data = await webSearch(config, { query }).catch((error) => {
+						ctx.ui.notify(`Search failed: ${(error as Error).message}`, "error");
+						return undefined;
+					});
+					if (data) return ctx.ui.notify(formatSearchResults(data), "info");
+					return;
 				}
 
 				if (sub === "route") {

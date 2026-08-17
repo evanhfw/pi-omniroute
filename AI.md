@@ -31,6 +31,7 @@ Dual-host extension integrating OmniRoute with Pi Coding Agent and Oh My Pi. It 
 - `reloadProviderFromModelsJson()` — offline startup registration.
 - `buildProviderEntry()` — native `openai-completions` provider configuration.
 - `routingSummary()` / `telemetryLines()` — safe user-visible formatting.
+- `webSearch()` / `formatSearchResults()` — `POST /v1/search` plus result formatting for the search tool and `/omni search`.
 - `createOmniExtension()` — lifecycle hooks, tools, and `/omni` dispatch.
 
 ## Invariants
@@ -47,6 +48,7 @@ Dual-host extension integrating OmniRoute with Pi Coding Agent and Oh My Pi. It 
 
 - `GET /v1/models` for health/discovery.
 - `POST /v1/chat/completions` through the host's native OpenAI-compatible provider.
+- `POST /v1/search` for the web search tool and `/omni search`.
 - Request headers: session ID, mode, budget/fallback, compression.
 - Response headers: route, cost, token, cache, fallback, compression, request, and version telemetry.
 

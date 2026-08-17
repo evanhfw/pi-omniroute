@@ -18,6 +18,7 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 - **Per-request routing controls** — choose OmniRoute mode packs, enforce a USD budget, and select compression without changing models.
 - **Session affinity** — Pi's session ID is forwarded as `X-OmniRoute-Session-Id` for sticky routing, cache affinity, and per-session cost attribution.
 - **Live route telemetry** — the status bar and `/omni last` show the actual provider/model, routing decision, latency, cost, tokens, cache hit, fallbacks, compression, and request ID reported by OmniRoute.
+- **Web search tool** — `omniroute_search` tool and `/omni search` run web/news search through OmniRoute's `/v1/search` (Serper, Brave, Exa, DuckDuckGo, and more).
 - **Env overrides** — configure connection and routing behavior entirely through environment variables.
 
 ## Installation
@@ -67,6 +68,7 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 | `/omni sync` | Fetch `/v1/models` and register models in the picker |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
+| `/omni search <query>` | Web search through OmniRoute `/v1/search` |
 | `/omni route <mode\|off>` | Set the per-request auto-routing mode: `fast`, `balanced`, `quality`, `cheap`, `reliable`, or `offline` |
 | `/omni budget <usd\|off> [strict\|cheapest]` | Apply a per-request cost ceiling and choose hard-fail or cheapest fallback behavior |
 | `/omni compression <mode>` | Set an OmniRoute compression mode, named compression combo, `default`, or `off` |
@@ -77,10 +79,13 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 
 ## Agent Tools
 
-Two tools the LLM can call directly:
+Three tools the LLM can call directly:
 
 - **`omniroute_status`** — returns server reachability, config path, and provider name
 - **`omniroute_sync`** — fetches `/v1/models` and re-registers the provider (same as `/omni sync`)
+- **`omniroute_search`** — searches the web or news via OmniRoute `/v1/search`; optional `max_results` (1–100, default 5), `provider` (e.g. `serper-search`, `brave-search`, `exa-search`, `duckduckgo-free`), and `search_type` (`web`/`news`)
+
+Tool calls go through the same OmniRoute server as chat requests, so search provider credentials and quota live server-side; no API key is exposed in the tool.
 
 ## How It Works
 
