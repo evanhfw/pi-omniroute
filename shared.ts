@@ -32,6 +32,18 @@ export interface AgentHomeOptions {
 // ─── Internal types ───────────────────────────────────────────────────────────
 type RoutingMode = "default" | "fast" | "balanced" | "quality" | "cheap" | "reliable" | "offline";
 type BudgetFallback = "cheapest" | "strict";
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
+
+/** Per-model metadata patches for fields the endpoint omits (keyed by exact model id). */
+type ModelOverride = {
+	name?: string;
+	reasoning?: boolean;
+	thinkingLevelMap?: ThinkingLevelMap;
+	input?: string[];
+	contextWindow?: number;
+	maxTokens?: number;
+};
 
 interface OmniConfig {
 	serverUrl: string;
@@ -41,6 +53,7 @@ interface OmniConfig {
 	budgetUsd?: number;
 	budgetFallback: BudgetFallback;
 	compression: string;
+	modelOverrides?: Record<string, ModelOverride>;
 }
 
 interface RouteTelemetry {
@@ -69,7 +82,8 @@ interface OmniApiModel {
 	max_output_tokens?: number;
 	max_tokens?: number;
 	reasoning?: boolean;
-	capabilities?: { reasoning?: boolean; thinking?: boolean };
+	capabilities?: { reasoning?: boolean; thinking?: boolean; effort_tiers?: unknown };
+	effort_tiers?: unknown;
 	input_modalities?: unknown;
 	input?: unknown;
 	output_modalities?: unknown;
@@ -86,6 +100,7 @@ type SyncedModel = {
 	maxTokens?: number;
 	reasoning?: boolean;
 	input?: string[];
+	thinkingLevelMap?: ThinkingLevelMap;
 };
 
 type ProviderModelConfig = {
@@ -97,6 +112,7 @@ type ProviderModelConfig = {
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow: number;
 	maxTokens: number;
+	thinkingLevelMap?: ThinkingLevelMap;
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -104,6 +120,7 @@ const PROVIDER_API = "openai-completions";
 const AUTO_MODELS = ["auto", "auto/coding", "auto/fast", "auto/cheap", "auto/offline", "auto/smart", "auto/lkgp"];
 const EXTENSION_STATE_DIR = "omniroute-agent-extension";
 const ROUTING_MODES: RoutingMode[] = ["default", "fast", "balanced", "quality", "cheap", "reliable", "offline"];
+const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const DEFAULT_CONFIG: OmniConfig = {
 	serverUrl: "http://127.0.0.1:20128",
 	apiKey: "",
@@ -136,10 +153,37 @@ function normalizeServerUrl(value: string): string {
 	return url || DEFAULT_CONFIG.serverUrl;
 }
 
+function sanitizeModelOverrides(value: unknown): Record<string, ModelOverride> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const out: Record<string, ModelOverride> = {};
+	for (const [id, raw] of Object.entries(value as Record<string, any>)) {
+		if (!id || !raw || typeof raw !== "object") continue;
+		const override: ModelOverride = {};
+		if (typeof raw.name === "string") override.name = raw.name;
+		if (typeof raw.reasoning === "boolean") override.reasoning = raw.reasoning;
+		const input = normalizeModalities(raw.input);
+		if (input.length > 0) override.input = input;
+		if (Number.isFinite(raw.contextWindow) && raw.contextWindow > 0) override.contextWindow = Number(raw.contextWindow);
+		if (Number.isFinite(raw.maxTokens) && raw.maxTokens > 0) override.maxTokens = Number(raw.maxTokens);
+		if (raw.thinkingLevelMap && typeof raw.thinkingLevelMap === "object") {
+			const map: ThinkingLevelMap = {};
+			for (const level of THINKING_LEVELS) {
+				const mapped = (raw.thinkingLevelMap as Record<string, unknown>)[level];
+				if (typeof mapped === "string") map[level] = mapped;
+				else if (mapped === null) map[level] = null;
+			}
+			if (Object.keys(map).length > 0) override.thinkingLevelMap = map;
+		}
+		if (Object.keys(override).length > 0) out[id] = override;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function sanitizeConfig(input: Partial<OmniConfig>): OmniConfig {
 	const rawMode = String(input.routingMode ?? DEFAULT_CONFIG.routingMode).toLowerCase() as RoutingMode;
 	const rawBudget = Number(input.budgetUsd);
 	const rawFallback = String(input.budgetFallback ?? DEFAULT_CONFIG.budgetFallback).toLowerCase();
+	const modelOverrides = sanitizeModelOverrides(input.modelOverrides);
 	return {
 		serverUrl: normalizeServerUrl(String(input.serverUrl || DEFAULT_CONFIG.serverUrl)),
 		apiKey: String(input.apiKey ?? ""),
@@ -148,6 +192,7 @@ function sanitizeConfig(input: Partial<OmniConfig>): OmniConfig {
 		...(Number.isFinite(rawBudget) && rawBudget > 0 ? { budgetUsd: rawBudget } : {}),
 		budgetFallback: rawFallback === "strict" ? "strict" : "cheapest",
 		compression: String(input.compression ?? DEFAULT_CONFIG.compression).trim() || DEFAULT_CONFIG.compression,
+		...(modelOverrides ? { modelOverrides } : {}),
 	};
 }
 
@@ -247,6 +292,27 @@ function normalizeModalities(value: unknown): string[] {
 	return out;
 }
 
+function normalizeEffortTiers(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const out: string[] = [];
+	for (const item of value) {
+		const tier = String(item).trim().toLowerCase();
+		if (tier && !out.includes(tier)) out.push(tier);
+	}
+	return out;
+}
+
+/** Map endpoint effort tiers onto Pi thinking levels; unsupported levels are hidden (null). */
+function buildThinkingLevelMap(tiers: string[]): ThinkingLevelMap | undefined {
+	if (tiers.length === 0) return undefined;
+	const map: ThinkingLevelMap = {};
+	for (const level of THINKING_LEVELS) {
+		if (level === "off") continue;
+		map[level] = tiers.includes(level) ? level : null;
+	}
+	return map;
+}
+
 function isPiChatModel(model: OmniApiModel): boolean {
 	const output = normalizeModalities(model.output_modalities ?? model.output);
 	if (String(model.type || "chat").toLowerCase() === "image") return false;
@@ -268,6 +334,7 @@ function upsertSyncedModel(models: SyncedModel[], next: SyncedModel): void {
 		contextWindow: next.contextWindow ?? existing.contextWindow,
 		maxTokens: next.maxTokens ?? existing.maxTokens,
 		reasoning: existing.reasoning || next.reasoning,
+		thinkingLevelMap: next.thinkingLevelMap ?? existing.thinkingLevelMap,
 	};
 }
 
@@ -300,6 +367,9 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 
 		if (m.reasoning || m.capabilities?.reasoning || m.capabilities?.thinking) synced.reasoning = true;
 
+		const levelMap = buildThinkingLevelMap(normalizeEffortTiers(m.capabilities?.effort_tiers ?? m.effort_tiers));
+		if (levelMap) synced.thinkingLevelMap = levelMap;
+
 		upsertSyncedModel(results, synced);
 	}
 
@@ -313,8 +383,8 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 		.map(({ owned_by: _owned_by, ...rest }) => rest);
 }
 
-function buildProviderModelConfig(m: SyncedModel): ProviderModelConfig {
-	return {
+function buildProviderModelConfig(m: SyncedModel, override?: ModelOverride): ProviderModelConfig {
+	const config: ProviderModelConfig = {
 		id: m.id,
 		name: m.name,
 		api: PROVIDER_API,
@@ -324,6 +394,8 @@ function buildProviderModelConfig(m: SyncedModel): ProviderModelConfig {
 		contextWindow: m.contextWindow ?? 128_000,
 		maxTokens: m.maxTokens ?? 16_384,
 	};
+	if (m.thinkingLevelMap) config.thinkingLevelMap = m.thinkingLevelMap;
+	return override ? { ...config, ...override } : config;
 }
 
 function buildAutoModel(id: string): ProviderModelConfig {
@@ -343,7 +415,8 @@ async function discoverModels(config: OmniConfig): Promise<ProviderModelConfig[]
 	const synced = await fetchSyncedModels(config);
 	const syncedIds = new Set(synced.map((m) => m.id));
 	const autoModels = AUTO_MODELS.filter((id) => !syncedIds.has(id)).map(buildAutoModel);
-	return [...autoModels, ...synced.map(buildProviderModelConfig)];
+	const overrides = config.modelOverrides ?? {};
+	return [...autoModels, ...synced.map((m) => buildProviderModelConfig(m, overrides[m.id]))];
 }
 
 function buildProviderEntry(config: OmniConfig, models: ProviderModelConfig[]): any {

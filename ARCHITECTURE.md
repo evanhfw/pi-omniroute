@@ -22,8 +22,9 @@ The adapters import their host's `ExtensionAPI`; `shared.ts` deliberately has no
 /omni setup or /omni sync
   -> GET {serverUrl}/v1/models
   -> discard non-chat/image-only entries
-  -> normalize text/image, context, output, and reasoning metadata
+  -> normalize text/image, context, output, reasoning, and effort-tier metadata
   -> prepend missing auto/* virtual models
+  -> apply config `modelOverrides` (per-model patches for metadata the endpoint omits)
   -> register an openai-completions provider
   -> merge that provider into the host models.json
   -> refresh the model registry
@@ -32,6 +33,8 @@ The adapters import their host's `ExtensionAPI`; `shared.ts` deliberately has no
 At extension load, the saved provider is registered from `models.json` without a network call. This keeps startup fast and models available while OmniRoute is temporarily offline. Explicit setup/sync performs live discovery.
 
 Only the configured provider key is replaced in `models.json`; unrelated providers are preserved.
+
+Endpoint metadata is authoritative but incomplete for some models. `effort_tiers` becomes a `thinkingLevelMap` (unsupported Pi levels are hidden with `null`). Fields the endpoint omits (e.g. `max_output_tokens`, `input_modalities`) can be patched per model via `modelOverrides` in `config.json`, keyed by exact model id; each override may set `name`, `reasoning`, `thinkingLevelMap`, `input`, `contextWindow`, and `maxTokens`.
 
 ## Provider Requests
 

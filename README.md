@@ -11,7 +11,7 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 
 - **Wizard-based setup** — `/omni setup` inside `pi` or `omp`. No manual JSON editing.
 - **Dual CLI support** — one package, identical feature set for both `pi` and `omp`.
-- **Model sync** — push all OmniRoute models into the `Ctrl+P` / `/model` picker with full metadata: context windows, max tokens, reasoning, and vision capabilities.
+- **Model sync** — push all OmniRoute models into the `Ctrl+P` / `/model` picker with full metadata: context windows, max tokens, reasoning, effort tiers, and vision capabilities.
 - **Native tool calls** — the host's built-in `openai-completions` handler runs every request, so you get real SSE streaming and native `tool_calls` for all models.
 - **Smart sorting** — models grouped by provider prefix, auto-routing models (`auto`, `auto/coding`, etc.) always first.
 - **Health monitoring** — periodic reachability checks with status bar indicators.
@@ -23,25 +23,42 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 
 ## Installation
 
-**Oh My Pi:**
-
-```bash
-omp install omniroute-agent-extension
-```
-
-```bash
-omp install git:github.com/md-riaz/omniroute-agent-extension
-```
+Install from git (recommended — this fork):
 
 **Pi Coding Agent:**
 
 ```bash
-pi install omniroute-agent-extension
+pi install git:github.com/evanhfw/pi-omniroute
 ```
 
+**Oh My Pi:**
+
 ```bash
-pi install git:github.com/md-riaz/omniroute-agent-extension
+omp install git:github.com/evanhfw/pi-omniroute
 ```
+
+Pin a branch, tag, or commit for reproducible installs:
+
+```bash
+pi install git:github.com/evanhfw/pi-omniroute@<tag-or-sha>
+```
+
+Or install from npm:
+
+```bash
+pi install npm:omniroute-agent-extension
+omp install npm:omniroute-agent-extension
+```
+
+The install adds a `packages` entry to settings (`~/.pi/agent/settings.json` or `~/.omp/agent/settings.json`) and clones the source into the agent `git/` directory. Restart the CLI after installing or updating. `pi update --extensions` reconciles installed packages, and `pi -e git:github.com/evanhfw/pi-omniroute` runs the package for one session without saving it.
+
+Local development (run straight from a checkout):
+
+```bash
+pi install ./pi-omniroute
+```
+
+Extensions load at startup, so restart the CLI after editing extension source.
 
 ## Getting Started
 
@@ -58,6 +75,18 @@ Config is saved to:
 | `pi` | `~/.pi/agent/omniroute-agent-extension/config.json` |
 
 Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.json`) and reloaded on startup without a network call.
+
+Some models omit metadata on `/v1/models` (e.g. output limit or vision support). Patch individual models with `modelOverrides` in `config.json`, keyed by exact model id:
+
+```json
+{
+  "modelOverrides": {
+    "cmd/deepseek/deepseek-v4.1-flash": { "maxTokens": 384000, "input": ["text", "image"] }
+  }
+}
+```
+
+Allowed override fields: `name`, `reasoning`, `thinkingLevelMap`, `input`, `contextWindow`, `maxTokens`.
 
 ## Commands
 

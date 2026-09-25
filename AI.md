@@ -25,11 +25,12 @@ Dual-host extension integrating OmniRoute with Pi Coding Agent and Oh My Pi. It 
 
 ## Key Functions in `shared.ts`
 
-- `loadConfig()` / `sanitizeConfig()` — backward-compatible file + environment resolution.
-- `discoverModels()` — calls `/v1/models`, normalizes metadata, and adds missing auto models.
+- `loadConfig()` / `sanitizeConfig()` — backward-compatible file + environment resolution (includes `modelOverrides`).
+- `discoverModels()` — calls `/v1/models`, normalizes metadata (context, output, reasoning, effort tiers, vision), applies `modelOverrides`, and adds missing auto models.
 - `registerOmniProvider()` — live registration plus `models.json` persistence.
 - `reloadProviderFromModelsJson()` — offline startup registration.
 - `buildProviderEntry()` — native `openai-completions` provider configuration.
+- `buildThinkingLevelMap()` / `sanitizeModelOverrides()` — map `effort_tiers` to Pi thinking levels and validate per-model metadata patches.
 - `routingSummary()` / `telemetryLines()` — safe user-visible formatting.
 - `webSearch()` / `formatSearchResults()` — `POST /v1/search` plus result formatting for the search tool and `/omni search`.
 - `createOmniExtension()` — lifecycle hooks, tools, and `/omni` dispatch.
