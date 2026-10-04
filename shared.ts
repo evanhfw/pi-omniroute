@@ -628,18 +628,83 @@ type ModelChoice = { id: string; name: string; contextWindow?: number; maxTokens
 function csiToKey(code: number, modifier: number): string | undefined {
 	const ctrl = (modifier & 4) !== 0;
 	if (code === 13) return "\r";
-	if (code === 9) return "\t";
+	if (code === 9) return (modifier & 1) !== 0 ? "\x1b[Z" : "\t";
 	if (code === 27) return "\x1b";
 	if (code === 32) return ctrl ? "\x00" : " ";
 	if (code === 127 || code === 8) return "\x7f";
-	if (code === 57419) return "\x1b[A";
-	if (code === 57420) return "\x1b[B";
-	if (code === 57421) return "\x1b[5~";
-	if (code === 57422) return "\x1b[6~";
+	// Kitty functional arrows (positive codepoints) and parseKittySequence's
+	// negative internal codepoints.
+	const funcArrow = FUNC_ARROWS.get(code);
+	if (funcArrow) return funcArrow;
+	if (code === -1) return "\x1b[A";
+	if (code === -2) return "\x1b[B";
+	if (code === -3) return "\x1b[C";
+	if (code === -4) return "\x1b[D";
+	if (code === -12) return "\x1b[5~";
+	if (code === -13) return "\x1b[6~";
 	if (ctrl && code >= 97 && code <= 122) return String.fromCharCode(code - 96);
 	if (ctrl && code >= 65 && code <= 90) return String.fromCharCode(code - 64);
 	if (code >= 32 && code < 127) return String.fromCharCode(code);
 	return undefined;
+}
+
+/** Kitty CSI-u functional codepoints for arrows and page keys. */
+const FUNC_ARROWS = new Map<number, string>([
+	[57350, "\x1b[D"],
+	[57351, "\x1b[C"],
+	[57352, "\x1b[A"],
+	[57353, "\x1b[B"],
+	[57354, "\x1b[5~"],
+	[57355, "\x1b[6~"],
+	[57417, "\x1b[D"],
+	[57418, "\x1b[C"],
+	[57419, "\x1b[A"],
+	[57420, "\x1b[B"],
+	[57421, "\x1b[5~"],
+	[57422, "\x1b[6~"],
+]);
+
+/**
+ * Normalize every key encoding we may receive into a canonical legacy sequence:
+ * plain ASCII, legacy CSI (\x1b[A), kitty CSI-u (\x1b[97;5:1u), and xterm
+ * modifyOtherKeys (\x1b[27;5;97~). Also strips key-release events.
+ */
+function normalizeKey(data: string): string {
+	if (!data.startsWith("\x1b")) return data;
+
+	// Kitty CSI-u: CSI key[:alts] ; mods[:event] ; text u
+	if (data.endsWith("u")) {
+		const parts = data.slice(2, -1).split(";");
+		const codePart = (parts[0] ?? "").split(":");
+		const code = Number(codePart[0]);
+		if (Number.isFinite(code)) {
+			const modPart = (parts[1] ?? "").split(":");
+			const modifier = modPart[0] ? Number(modPart[0]) - 1 : 0;
+			if (modPart[1] === "3") return ""; // key release
+			return csiToKey(code, modifier) ?? data;
+		}
+	}
+
+	// Arrow/page with modifier: \x1b[1;<mod>[:<event>]A|B|C|D or \x1b[1;<mod>~ variants
+	const arrow = /^\x1b\[1;(\d+)(?::(\d+))?([ABCD])$/.exec(data);
+	if (arrow) {
+		if (arrow[2] === "3") return "";
+		const base: Record<string, string> = { A: "\x1b[A", B: "\x1b[B", C: "\x1b[C", D: "\x1b[D" };
+		return base[arrow[3]] ?? data;
+	}
+
+	// Page up/down with modifier: \x1b[5;<mod>~ or \x1b[6;<mod>~
+	const page = /^\x1b\[([56]);(\d+)(?::(\d+))?~$/.exec(data);
+	if (page) {
+		if (page[3] === "3") return "";
+		return Number(page[1]) === 5 ? "\x1b[5~" : "\x1b[6~";
+	}
+
+	// xterm modifyOtherKeys: \x1b[27;<mod>;<code>~
+	const mok = /^\x1b\[27;(\d+);(\d+)~$/.exec(data);
+	if (mok) return csiToKey(Number(mok[2]), Number(mok[1]) - 1) ?? data;
+
+	return data;
 }
 
 /** Self-contained multi-select with incremental filter; no host/pi-tui imports. */
@@ -693,23 +758,9 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 			tui.requestRender?.();
 		};
 
-		const handleInput = (data: string): void => {
-			// Kitty CSI-u: CSI key[:alts] ; mods[:event] ; text u — Ghostty sends the
-			// event type (3 = release), so parse params generically.
-			if (data.startsWith("\x1b[") && data.endsWith("u")) {
-				const parts = data.slice(2, -1).split(";");
-				const codePart = parts[0]?.split(":") ?? [];
-				const code = Number(codePart[0]);
-				const modPart = (parts[1] ?? "").split(":");
-				const modifier = modPart[0] ? Number(modPart[0]) - 1 : 0;
-				const isRelease = modPart[1] === "3";
-				if (Number.isFinite(code) && !isRelease) {
-					data = csiToKey(code, modifier) ?? data;
-				}
-			}
-			// Normalize xterm modifyOtherKeys sequences (e.g. "\x1b[27;5;97~").
-			const mok = /^\x1b\[27;(\d+);(\d+)~$/.exec(data);
-			if (mok) data = csiToKey(Number(mok[2]), Number(mok[1]) - 1) ?? data;
+		const handleInput = (raw: string): void => {
+			const data = normalizeKey(raw);
+			if (data === "") return; // key release
 			if (data === "\x1b" || data === "\x03") return done(undefined);
 			if (data === "\r" || data === "\n") return done([...checked]);
 			const items = view();
@@ -881,15 +932,9 @@ async function editModelOverrides(
 			draft = null;
 		};
 
-		const handleInput = (data: string): void => {
-			// Normalize kitty CSI-u sequences the same way the picker does.
-			if (data.startsWith("\x1b[") && data.endsWith("u")) {
-				const parts = data.slice(2, -1).split(";");
-				const code = Number((parts[0] ?? "").split(":")[0]);
-				const modPart = (parts[1] ?? "").split(":");
-				const modifier = modPart[0] ? Number(modPart[0]) - 1 : 0;
-				if (Number.isFinite(code) && modPart[1] !== "3") data = csiToKey(code, modifier) ?? data;
-			}
+		const handleInput = (raw: string): void => {
+			const data = normalizeKey(raw);
+			if (data === "") return; // key release
 
 			if (draft !== null) {
 				if (data === "\x1b" || data === "\x03") {
