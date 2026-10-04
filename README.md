@@ -64,7 +64,7 @@ Extensions load at startup, so restart the CLI after editing extension source.
 
 1. Start your CLI (`pi` or `omp`)
 2. Run `/omni setup` — enter your OmniRoute server URL and API key
-3. Run `/omni sync` — opens a searchable multi-select; choose which models to register, then optionally patch metadata
+3. Run `/omni sync` — opens a searchable multi-select; choose models, then a per-model tab editor shows endpoint metadata you can correct
 4. Select any model with `/model` and start chatting
 
 Config is saved to:
@@ -78,7 +78,7 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 
 The `/omni sync` picker writes the chosen ids to `selectedModels` in `config.json`; later syncs pre-check that allowlist and filter out unchecked models. Use `/omni sync all` to clear the allowlist and register every endpoint model. In non-interactive modes (print/JSON) sync registers all models and does not prompt.
 
-Some models omit metadata on `/v1/models` (e.g. output limit or vision support). After picking models, the sync flow asks for comma-separated model ids to patch and prompts `contextWindow`, `maxTokens`, `reasoning`, and `input` for each; blank input keeps the current value. The result is stored as `modelOverrides` in `config.json`, keyed by exact model id. You can also edit it by hand:
+Some models omit metadata on `/v1/models` (e.g. output limit or vision support). After picking models, `/omni sync` opens a tab-per-model editor showing the endpoint values as defaults for `context size`, `max output tokens`, `thinking capability`, and `image support`. Move with `↑↓`, switch models with `←→` or `tab`, press `enter` to edit a field (type to replace, blank keeps the default), `ctrl+s` to save and `esc` to discard. Only values that differ from the endpoint are stored as `modelOverrides` in `config.json`, keyed by exact model id. You can also edit it by hand:
 
 ```json
 {
@@ -97,7 +97,7 @@ Allowed override fields: `name`, `reasoning`, `thinkingLevelMap`, `input`, `cont
 |---|---|
 | `/omni` | Server health and provider status |
 | `/omni setup` | Configure server URL and API key interactively |
-| `/omni sync` | Fetch `/v1/models`, multi-select which to register (`↑↓ move`, type to filter, `space` toggle, `ctrl+a`/`ctrl+n` all/none), optionally patch metadata |
+| `/omni sync` | Fetch `/v1/models`, multi-select which to register (`↑↓ move`, type to filter, `space` toggle, `ctrl+a`/`ctrl+n` all/none), then edit per-model metadata in a tab editor |
 | `/omni sync all` | Clear the `selectedModels` allowlist and register every endpoint model |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |

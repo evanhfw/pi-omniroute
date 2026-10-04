@@ -562,7 +562,7 @@ function helpText(): string {
 		"",
 		"/omni                         Status",
 		"/omni setup                   Configure server URL and API key",
-		"/omni sync                    Pick + register models; optionally patch metadata",
+		"/omni sync                    Pick models, then edit their metadata per tab",
 		"/omni sync all                Register every endpoint model (clear allowlist)",
 		"/omni models [search]         Browse models",
 		"/omni test <model>            Smoke-test /v1/chat/completions",
@@ -628,6 +628,7 @@ type ModelChoice = { id: string; name: string; contextWindow?: number; maxTokens
 function csiToKey(code: number, modifier: number): string | undefined {
 	const ctrl = (modifier & 4) !== 0;
 	if (code === 13) return "\r";
+	if (code === 9) return "\t";
 	if (code === 27) return "\x1b";
 	if (code === 32) return ctrl ? "\x00" : " ";
 	if (code === 127 || code === 8) return "\x7f";
@@ -743,41 +744,188 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 	});
 }
 
-/** Prompt manual metadata overrides for named model ids; blank input keeps current values. */
-async function promptOverrides(ctx: any, models: ModelChoice[], existing: Record<string, ModelOverride>): Promise<Record<string, ModelOverride>> {
-	const out: Record<string, ModelOverride> = { ...existing };
-	for (const model of models) {
-		const current = out[model.id] ?? {};
-		const patch: ModelOverride = { ...current };
-		const ctxNow = current.contextWindow ?? model.contextWindow;
-		const outNow = current.maxTokens ?? model.maxTokens;
-		const inputNow = (current.input ?? model.input ?? ["text"]).join(",");
-		const reasoningNow = current.reasoning ?? model.reasoning ?? false;
+/** Editable metadata row shown in the per-model override editor. */
+type OverrideField = {
+	key: "contextWindow" | "maxTokens" | "reasoning" | "input";
+	label: string;
+	format(model: ModelChoice, value: ModelOverride): string;
+	/** Parse typed text into a patch value; undefined = leave unchanged. */
+	parse(text: string): unknown;
+};
 
-		const contextWindow = await ctx.ui.input(`${model.id} — contextWindow`, String(ctxNow ?? ""));
-		if (contextWindow === undefined) return out;
-		const maxTokens = await ctx.ui.input(`${model.id} — maxTokens (max output)`, String(outNow ?? ""));
-		if (maxTokens === undefined) return out;
-		const reasoning = await ctx.ui.input(`${model.id} — reasoning (y/n)`, reasoningNow ? "y" : "n");
-		if (reasoning === undefined) return out;
-		const input = await ctx.ui.input(`${model.id} — input modalities (e.g. text,image)`, inputNow);
-		if (input === undefined) return out;
+const OVERRIDE_FIELDS: OverrideField[] = [
+	{
+		key: "contextWindow",
+		label: "context size",
+		format: (m, v) => String(v.contextWindow ?? m.contextWindow ?? "unknown"),
+		parse: (t) => {
+			const n = Number(t.replace(/[^0-9]/g, ""));
+			return Number.isFinite(n) && n > 0 ? n : undefined;
+		},
+	},
+	{
+		key: "maxTokens",
+		label: "max output tokens",
+		format: (m, v) => String(v.maxTokens ?? m.maxTokens ?? "unknown"),
+		parse: (t) => {
+			const n = Number(t.replace(/[^0-9]/g, ""));
+			return Number.isFinite(n) && n > 0 ? n : undefined;
+		},
+	},
+	{
+		key: "reasoning",
+		label: "thinking capability",
+		format: (m, v) => ((v.reasoning ?? m.reasoning) ? "yes" : "no"),
+		parse: (t) => (/^(y|yes|true|on|1)$/i.test(t) ? true : /^(n|no|false|off|0)$/i.test(t) ? false : undefined),
+	},
+	{
+		key: "input",
+		label: "image support",
+		format: (m, v) => ((v.input ?? m.input ?? ["text"]).includes("image") ? "yes" : "no"),
+		// yes/no toggles image; anything else is treated as an explicit modality list.
+		parse: (t) => {
+			if (/^(y|yes|true|on|1)$/i.test(t)) return ["text", "image"];
+			if (/^(n|no|false|off|0)$/i.test(t)) return ["text"];
+			const mods = normalizeModalities(t);
+			return mods.length > 0 ? mods : undefined;
+		},
+	},
+];
 
-		if (contextWindow.trim()) patch.contextWindow = Number(contextWindow);
-		if (maxTokens.trim()) patch.maxTokens = Number(maxTokens);
-		if (/^(y|yes|true)$/i.test(reasoning.trim())) patch.reasoning = true;
-		else if (/^(n|no|false)$/i.test(reasoning.trim())) patch.reasoning = false;
-		if (input.trim()) patch.input = normalizeModalities(input);
+/**
+ * Tabbed per-model override editor. One tab per selected model shows the endpoint
+ * metadata as inline defaults; typing edits the focused field. Used only in TUI mode.
+ */
+async function editModelOverrides(
+	ctx: any,
+	models: ModelChoice[],
+	existing: Record<string, ModelOverride>,
+): Promise<Record<string, ModelOverride> | undefined> {
+	if (typeof ctx.ui?.custom !== "function" || models.length === 0) return undefined;
+	return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: Record<string, ModelOverride> | undefined) => void) => {
+		const drafts: Record<string, ModelOverride> = {};
+		for (const model of models) drafts[model.id] = { ...(existing[model.id] ?? {}) };
+		let tab = 0;
+		let field = 0;
+		// null = browsing rows; string = editing the focused row's text
+		let draft: string | null = null;
+		let cached: string[] | undefined;
+		const fg = (color: string, text: string): string => (theme?.fg ? theme.fg(color, text) : text);
+		const truncate = (text: string, width: number): string =>
+			text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text;
+		const model = (): ModelChoice => models[tab];
+		const current = (): ModelOverride => drafts[model().id] ?? (drafts[model().id] = {});
 
-		if (model.contextWindow && patch.contextWindow === model.contextWindow) delete patch.contextWindow;
-		if (model.maxTokens && patch.maxTokens === model.maxTokens) delete patch.maxTokens;
-		if (patch.reasoning === (model.reasoning ?? false)) delete patch.reasoning;
-		if (patch.input && patch.input.join(",") === (model.input ?? ["text"]).join(",")) delete patch.input;
+		const tabLine = (width: number): string => {
+			const names = models.map((m, i) => (i === tab ? fg("accent", `[${m.name}]`) : fg("muted", ` ${m.name} `)));
+			return truncate(names.join(" "), width);
+		};
 
-		if (Object.keys(patch).length > 0) out[model.id] = patch;
-		else delete out[model.id];
-	}
-	return out;
+		const render = (width: number): string[] => {
+			if (cached) return cached;
+			const lines: string[] = [];
+			lines.push(fg("dim", "Manual metadata overrides — blank or unchanged keeps endpoint values"));
+			lines.push(tabLine(width));
+			lines.push(fg("border", "─".repeat(Math.max(0, Math.min(width, 60)))));
+			for (let i = 0; i < OVERRIDE_FIELDS.length; i++) {
+				const f = OVERRIDE_FIELDS[i];
+				const active = i === field;
+				const shown = active && draft !== null ? (draft === "" ? fg("dim", f.format(model(), current())) : draft) : f.format(model(), current());
+				const marker = active ? "❯" : " ";
+				const label = `${marker} ${f.label}:`;
+				const line = `${label.padEnd(24)} ${shown}${active && draft !== null ? "▎" : ""}`;
+				lines.push(fg(active ? "accent" : "text", truncate(line, width)));
+			}
+			lines.push("");
+			lines.push(
+				fg(
+					"dim",
+					truncate(
+						draft !== null
+							? "type value • enter apply • esc cancel field"
+							: `↑↓ field • ←→ or tab model (${tab + 1}/${models.length}) • enter edit • ctrl+s save • esc discard`,
+						width,
+					),
+				),
+			);
+			cached = lines;
+			return lines;
+		};
+
+		const refresh = (): void => {
+			cached = undefined;
+			tui.requestRender?.();
+		};
+
+		// Drop empty patches and values that merely restate endpoint metadata.
+		const pruneDrafts = (): Record<string, ModelOverride> => {
+			const out: Record<string, ModelOverride> = {};
+			for (const model of models) {
+				const patch = { ...(drafts[model.id] ?? {}) };
+				if (patch.contextWindow !== undefined && patch.contextWindow === model.contextWindow) delete patch.contextWindow;
+				if (patch.maxTokens !== undefined && patch.maxTokens === model.maxTokens) delete patch.maxTokens;
+				if (patch.reasoning !== undefined && patch.reasoning === (model.reasoning ?? false)) delete patch.reasoning;
+				const base = (model.input ?? ["text"]).join(",");
+				if (patch.input && patch.input.join(",") === base) delete patch.input;
+				if (Object.keys(patch).length > 0) out[model.id] = patch;
+			}
+			return out;
+		};
+
+		const commitField = (): void => {
+			if (draft === null) return;
+			const f = OVERRIDE_FIELDS[field];
+			const parsed = f.parse(draft);
+			if (parsed !== undefined) (current() as Record<string, unknown>)[f.key] = parsed;
+			else if (draft.trim() === "") delete (current() as Record<string, unknown>)[f.key];
+			draft = null;
+		};
+
+		const handleInput = (data: string): void => {
+			// Normalize kitty CSI-u sequences the same way the picker does.
+			if (data.startsWith("\x1b[") && data.endsWith("u")) {
+				const parts = data.slice(2, -1).split(";");
+				const code = Number((parts[0] ?? "").split(":")[0]);
+				const modPart = (parts[1] ?? "").split(":");
+				const modifier = modPart[0] ? Number(modPart[0]) - 1 : 0;
+				if (Number.isFinite(code) && modPart[1] !== "3") data = csiToKey(code, modifier) ?? data;
+			}
+
+			if (draft !== null) {
+				if (data === "\x1b" || data === "\x03") {
+					draft = null;
+					refresh();
+					return;
+				}
+				if (data === "\r" || data === "\n") {
+					commitField();
+					refresh();
+					return;
+				}
+				if (data === "\x7f" || data === "\b") draft = draft.slice(0, -1);
+				else if (data === "\x15") draft = "";
+				else if (data >= " " && !data.startsWith("\x1b")) draft += data;
+				refresh();
+				return;
+			}
+
+			if (data === "\x1b" || data === "\x03") return done(undefined);
+			if (data === "\x13") return done(pruneDrafts()); // ctrl+s
+			if (data === "\r" || data === "\n") {
+				// Start with an empty buffer: type to replace, blank keeps the default.
+				draft = "";
+				refresh();
+				return;
+			}
+			if (data === "\x1b[A") field = (field - 1 + OVERRIDE_FIELDS.length) % OVERRIDE_FIELDS.length;
+			else if (data === "\x1b[B") field = (field + 1) % OVERRIDE_FIELDS.length;
+			else if (data === "\x1b[C" || data === "\t") tab = (tab + 1) % models.length;
+			else if (data === "\x1b[D" || data === "\x1b[Z") tab = (tab - 1 + models.length) % models.length;
+			refresh();
+		};
+
+		return { render, invalidate: () => (cached = undefined), handleInput };
+	});
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -814,18 +962,14 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 			config = sanitizeConfig({ ...config, selectedModels: picked });
 			changed = true;
 
+			// Next step: tabbed editor over the picked models (auto/* virtual models carry
+			// no endpoint metadata, so only real picks are editable).
 			const byId = new Map(choices.map((c) => [c.id, c]));
-			const patchIds = await ctx.ui.input(
-				"Manually patch metadata for which model ids? (comma-separated, blank to skip)",
-				"",
-			);
-			if (patchIds?.trim()) {
-				const targets = patchIds
-					.split(",")
-					.map((id: string) => byId.get(id.trim()))
-					.filter((c: ModelChoice | undefined): c is ModelChoice => Boolean(c));
-				if (targets.length === 0) ctx.ui.notify("No matching model ids to patch.", "warning");
-				else config = sanitizeConfig({ ...config, modelOverrides: await promptOverrides(ctx, targets, config.modelOverrides ?? {}) });
+			const editable = picked.map((id) => byId.get(id)).filter((c): c is ModelChoice => Boolean(c) && !AUTO_MODELS.includes(c!.id));
+			if (editable.length > 0) {
+				const edited = await editModelOverrides(ctx, editable, config.modelOverrides ?? {});
+				if (edited === undefined) ctx.ui.notify("Kept existing overrides.", "info");
+				else config = sanitizeConfig({ ...config, modelOverrides: edited });
 			}
 		}
 

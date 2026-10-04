@@ -25,7 +25,7 @@ The adapters import their host's `ExtensionAPI`; `shared.ts` deliberately has no
   -> normalize text/image, context, output, reasoning, and effort-tier metadata
   -> prepend missing auto/* virtual models
   -> interactive multi-select writes config `selectedModels`; unchecked ids are dropped
-  -> optional per-model prompts patch `modelOverrides`
+  -> per-model tab editor reviews/patches context, output, thinking, and image support
   -> register an openai-completions provider
   -> merge that provider into the host models.json
   -> refresh the model registry
@@ -37,7 +37,7 @@ Only the configured provider key is replaced in `models.json`; unrelated provide
 
 Endpoint metadata is authoritative but incomplete for some models. `effort_tiers` becomes a `thinkingLevelMap` (unsupported Pi levels are hidden with `null`). Fields the endpoint omits (e.g. `max_output_tokens`, `input_modalities`) can be patched per model via `modelOverrides` in `config.json`, keyed by exact model id; each override may set `name`, `reasoning`, `thinkingLevelMap`, `input`, `contextWindow`, and `maxTokens`.
 
-Registration is scoped by an optional `selectedModels` allowlist. In TUI mode, `/omni sync` shows a searchable multi-select (pre-checked from the allowlist) and prompts for `modelOverrides` patches on chosen ids; the picked ids and patches persist to `config.json`. `discoverModels` drops any endpoint model not in the allowlist, so later startup and syncs stay scoped. `/omni sync all` clears the allowlist. In non-interactive modes sync registers all models without prompting.
+Registration is scoped by an optional `selectedModels` allowlist. In TUI mode, `/omni sync` shows a searchable multi-select (pre-checked from the allowlist), then opens a tab-per-model editor that seeds each field with endpoint metadata and writes only the changed values to `modelOverrides`; the picked ids and patches persist to `config.json`. `discoverModels` drops any endpoint model not in the allowlist, so later startup and syncs stay scoped. `/omni sync all` clears the allowlist. In non-interactive modes sync registers all models without prompting.
 
 ## Provider Requests
 
