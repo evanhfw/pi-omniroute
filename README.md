@@ -97,7 +97,7 @@ Allowed override fields: `name`, `reasoning`, `thinkingLevelMap`, `input`, `cont
 |---|---|
 | `/omni` | Server health and provider status |
 | `/omni setup` | Configure server URL and API key interactively |
-| `/omni sync` | Fetch `/v1/models`, multi-select which to register, optionally patch metadata |
+| `/omni sync` | Fetch `/v1/models`, multi-select which to register (`↑↓ move`, type to filter, `space` toggle, `ctrl+a`/`ctrl+n` all/none), optionally patch metadata |
 | `/omni sync all` | Clear the `selectedModels` allowlist and register every endpoint model |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |

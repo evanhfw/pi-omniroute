@@ -663,7 +663,7 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 			lines.push(
 				fg(
 					"dim",
-					truncate(`↑↓ move • space toggle • a=all n=none • enter confirm • esc cancel • ${items.length} shown`, width),
+					truncate(`↑↓ move • space toggle • ctrl+a all ctrl+n none • enter confirm • esc cancel • ${items.length} shown`, width),
 				),
 			);
 			cached = lines;
@@ -676,29 +676,35 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 		};
 
 		const handleInput = (data: string): void => {
-			// Normalize kitty CSI-u sequences (e.g. "\x1b[13u", "\x1b[32u") to plain keys.
-			const csiU = /^\x1b\[(\d+)(?:;\d+)*u$/.exec(data);
+			// Normalize kitty CSI-u sequences (e.g. "\x1b[13u", "\x1b[97;5u") to plain keys.
+			const csiU = /^\x1b\[(\d+)(?:;(\d+))*(?:;[\d:]*)?u$/.exec(data);
 			if (csiU) {
 				const code = Number(csiU[1]);
+				const mods = csiU.slice(2).filter(Boolean).map(Number);
+				// Kitty modifier values are 1 + bitmask (ctrl=4); treat any ctrl bit as ctrl.
+				const ctrl = mods.some((m) => (m - 1 & 4) !== 0);
 				if (code === 13) data = "\r";
 				else if (code === 27) data = "\x1b";
 				else if (code === 32) data = " ";
-				else if (code === 127) data = "\x7f";
+				else if (code === 127 || code === 8) data = "\x7f";
+				else if (ctrl && code >= 97 && code <= 122) data = String.fromCharCode(code - 96);
+				else if (ctrl && code >= 65 && code <= 90) data = String.fromCharCode(code - 64);
 				else if (code >= 32 && code < 127) data = String.fromCharCode(code);
 			}
 			if (data === "\x1b" || data === "\x03") return done(undefined);
 			if (data === "\r" || data === "\n") return done([...checked]);
 			const items = view();
-			if (data === "\x1b[A" || data === "k") cursor = Math.max(0, cursor - 1);
-			else if (data === "\x1b[B" || data === "j") cursor = Math.min(items.length - 1, cursor + 1);
+			if (data === "\x1b[A") cursor = Math.max(0, cursor - 1);
+			else if (data === "\x1b[B") cursor = Math.min(items.length - 1, cursor + 1);
 			else if (data === "\x1b[5~") cursor = Math.max(0, cursor - PAGE);
 			else if (data === "\x1b[6~") cursor = Math.min(items.length - 1, cursor + PAGE);
 			else if (data === " ") {
 				const item = items[cursor];
 				if (item) (checked.has(item.id) ? checked.delete(item.id) : checked.add(item.id));
 			}
-			else if (data === "a") for (const item of items) checked.add(item.id);
-			else if (data === "n") for (const item of items) checked.delete(item.id);
+			// Ctrl+combos so printable letters always go to the filter.
+			else if (data === "\x01") for (const item of items) checked.add(item.id);
+			else if (data === "\x0e") for (const item of items) checked.delete(item.id);
 			else if (data === "\x7f" || data === "\b") {
 				filter = filter.slice(0, -1);
 				cursor = 0;
