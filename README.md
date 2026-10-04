@@ -64,7 +64,7 @@ Extensions load at startup, so restart the CLI after editing extension source.
 
 1. Start your CLI (`pi` or `omp`)
 2. Run `/omni setup` — enter your OmniRoute server URL and API key
-3. Run `/omni sync` — populates the `Ctrl+P` / `/model` picker
+3. Run `/omni sync` — opens a searchable multi-select; choose which models to register, then optionally patch metadata
 4. Select any model with `/model` and start chatting
 
 Config is saved to:
@@ -76,10 +76,13 @@ Config is saved to:
 
 Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.json`) and reloaded on startup without a network call.
 
-Some models omit metadata on `/v1/models` (e.g. output limit or vision support). Patch individual models with `modelOverrides` in `config.json`, keyed by exact model id:
+The `/omni sync` picker writes the chosen ids to `selectedModels` in `config.json`; later syncs pre-check that allowlist and filter out unchecked models. Use `/omni sync all` to clear the allowlist and register every endpoint model. In non-interactive modes (print/JSON) sync registers all models and does not prompt.
+
+Some models omit metadata on `/v1/models` (e.g. output limit or vision support). After picking models, the sync flow asks for comma-separated model ids to patch and prompts `contextWindow`, `maxTokens`, `reasoning`, and `input` for each; blank input keeps the current value. The result is stored as `modelOverrides` in `config.json`, keyed by exact model id. You can also edit it by hand:
 
 ```json
 {
+  "selectedModels": ["cmd/deepseek/deepseek-v4.1-flash"],
   "modelOverrides": {
     "cmd/deepseek/deepseek-v4.1-flash": { "maxTokens": 384000, "input": ["text", "image"] }
   }
@@ -94,7 +97,8 @@ Allowed override fields: `name`, `reasoning`, `thinkingLevelMap`, `input`, `cont
 |---|---|
 | `/omni` | Server health and provider status |
 | `/omni setup` | Configure server URL and API key interactively |
-| `/omni sync` | Fetch `/v1/models` and register models in the picker |
+| `/omni sync` | Fetch `/v1/models`, multi-select which to register, optionally patch metadata |
+| `/omni sync all` | Clear the `selectedModels` allowlist and register every endpoint model |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
 | `/omni search <query>` | Web search through OmniRoute `/v1/search` |

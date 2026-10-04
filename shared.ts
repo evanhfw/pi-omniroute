@@ -54,6 +54,8 @@ interface OmniConfig {
 	budgetFallback: BudgetFallback;
 	compression: string;
 	modelOverrides?: Record<string, ModelOverride>;
+	/** Allowlist of endpoint model ids to register; omitted = register all. */
+	selectedModels?: string[];
 }
 
 interface RouteTelemetry {
@@ -179,11 +181,18 @@ function sanitizeModelOverrides(value: unknown): Record<string, ModelOverride> |
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function sanitizeSelectedModels(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const out = value.map((v) => String(v).trim()).filter(Boolean);
+	return Array.from(new Set(out));
+}
+
 function sanitizeConfig(input: Partial<OmniConfig>): OmniConfig {
 	const rawMode = String(input.routingMode ?? DEFAULT_CONFIG.routingMode).toLowerCase() as RoutingMode;
 	const rawBudget = Number(input.budgetUsd);
 	const rawFallback = String(input.budgetFallback ?? DEFAULT_CONFIG.budgetFallback).toLowerCase();
 	const modelOverrides = sanitizeModelOverrides(input.modelOverrides);
+	const selectedModels = sanitizeSelectedModels(input.selectedModels);
 	return {
 		serverUrl: normalizeServerUrl(String(input.serverUrl || DEFAULT_CONFIG.serverUrl)),
 		apiKey: String(input.apiKey ?? ""),
@@ -193,6 +202,7 @@ function sanitizeConfig(input: Partial<OmniConfig>): OmniConfig {
 		budgetFallback: rawFallback === "strict" ? "strict" : "cheapest",
 		compression: String(input.compression ?? DEFAULT_CONFIG.compression).trim() || DEFAULT_CONFIG.compression,
 		...(modelOverrides ? { modelOverrides } : {}),
+		...(selectedModels ? { selectedModels } : {}),
 	};
 }
 
@@ -413,10 +423,12 @@ function buildAutoModel(id: string): ProviderModelConfig {
 
 async function discoverModels(config: OmniConfig): Promise<ProviderModelConfig[]> {
 	const synced = await fetchSyncedModels(config);
-	const syncedIds = new Set(synced.map((m) => m.id));
-	const autoModels = AUTO_MODELS.filter((id) => !syncedIds.has(id)).map(buildAutoModel);
+	const allow = config.selectedModels ? new Set(config.selectedModels) : undefined;
+	const picked = allow ? synced.filter((m) => allow.has(m.id)) : synced;
+	const pickedIds = new Set(picked.map((m) => m.id));
+	const autoModels = AUTO_MODELS.filter((id) => !pickedIds.has(id)).map(buildAutoModel);
 	const overrides = config.modelOverrides ?? {};
-	return [...autoModels, ...synced.map((m) => buildProviderModelConfig(m, overrides[m.id]))];
+	return [...autoModels, ...picked.map((m) => buildProviderModelConfig(m, overrides[m.id]))];
 }
 
 function buildProviderEntry(config: OmniConfig, models: ProviderModelConfig[]): any {
@@ -550,7 +562,8 @@ function helpText(): string {
 		"",
 		"/omni                         Status",
 		"/omni setup                   Configure server URL and API key",
-		"/omni sync                    Sync models to Ctrl+P / /model picker",
+		"/omni sync                    Pick + register models; optionally patch metadata",
+		"/omni sync all                Register every endpoint model (clear allowlist)",
 		"/omni models [search]         Browse models",
 		"/omni test <model>            Smoke-test /v1/chat/completions",
 		"/omni search <query>          Web search via /v1/search",
@@ -608,6 +621,140 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 	return typeof content === "string" ? content.trim() : JSON.stringify(data).slice(0, 200);
 }
 
+// ─── Interactive model selection + manual overrides ───────────────────────────
+type ModelChoice = { id: string; name: string; contextWindow?: number; maxTokens?: number; input?: string[]; reasoning?: boolean };
+
+/** Self-contained multi-select with incremental filter; no host/pi-tui imports. */
+async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string[]): Promise<string[] | undefined> {
+	if (ctx.mode !== "tui" || typeof ctx.ui?.custom !== "function" || choices.length === 0) return undefined;
+	return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: string[] | undefined) => void) => {
+		const checked = new Set(preselected ?? choices.map((c) => c.id));
+		let filter = "";
+		let cursor = 0;
+		let cached: string[] | undefined;
+		const PAGE = 14;
+		const fg = (color: string, text: string): string => (theme?.fg ? theme.fg(color, text) : text);
+		const truncate = (text: string, width: number): string =>
+			text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text;
+		const view = (): ModelChoice[] => {
+			const q = filter.toLowerCase();
+			return q ? choices.filter((c) => `${c.id} ${c.name}`.toLowerCase().includes(q)) : choices;
+		};
+
+		const render = (width: number): string[] => {
+			if (cached) return cached;
+			const items = view();
+			if (cursor >= items.length) cursor = Math.max(0, items.length - 1);
+			let start = Math.max(0, Math.min(cursor - Math.floor(PAGE / 2), items.length - PAGE));
+			if (start < 0) start = 0;
+			const window = items.slice(start, start + PAGE);
+			const lines: string[] = [];
+			lines.push(truncate(`Select models to register (${checked.size}/${choices.length} checked)`, width));
+			lines.push(fg("muted", truncate(`filter: ${filter}${filter ? "" : " (type to search)"}`, width)));
+			for (let i = 0; i < window.length; i++) {
+				const item = window[i];
+				const active = start + i === cursor;
+				const mark = checked.has(item.id) ? "x" : " ";
+				const prefix = active ? "> " : "  ";
+				const line = `${prefix}[${mark}] ${item.id}`;
+				lines.push(fg(active ? "accent" : checked.has(item.id) ? "text" : "muted", truncate(line, width)));
+			}
+			if (items.length === 0) lines.push(fg("warning", "no models match"));
+			lines.push(
+				fg(
+					"dim",
+					truncate(`↑↓ move • space toggle • a=all n=none • enter confirm • esc cancel • ${items.length} shown`, width),
+				),
+			);
+			cached = lines;
+			return lines;
+		};
+
+		const refresh = (): void => {
+			cached = undefined;
+			tui.requestRender?.();
+		};
+
+		const handleInput = (data: string): void => {
+			// Normalize kitty CSI-u sequences (e.g. "\x1b[13u", "\x1b[32u") to plain keys.
+			const csiU = /^\x1b\[(\d+)(?:;\d+)*u$/.exec(data);
+			if (csiU) {
+				const code = Number(csiU[1]);
+				if (code === 13) data = "\r";
+				else if (code === 27) data = "\x1b";
+				else if (code === 32) data = " ";
+				else if (code === 127) data = "\x7f";
+				else if (code >= 32 && code < 127) data = String.fromCharCode(code);
+			}
+			if (data === "\x1b" || data === "\x03") return done(undefined);
+			if (data === "\r" || data === "\n") return done([...checked]);
+			const items = view();
+			if (data === "\x1b[A" || data === "k") cursor = Math.max(0, cursor - 1);
+			else if (data === "\x1b[B" || data === "j") cursor = Math.min(items.length - 1, cursor + 1);
+			else if (data === "\x1b[5~") cursor = Math.max(0, cursor - PAGE);
+			else if (data === "\x1b[6~") cursor = Math.min(items.length - 1, cursor + PAGE);
+			else if (data === " ") {
+				const item = items[cursor];
+				if (item) (checked.has(item.id) ? checked.delete(item.id) : checked.add(item.id));
+			}
+			else if (data === "a") for (const item of items) checked.add(item.id);
+			else if (data === "n") for (const item of items) checked.delete(item.id);
+			else if (data === "\x7f" || data === "\b") {
+				filter = filter.slice(0, -1);
+				cursor = 0;
+			}
+			else if (data === "\x15") {
+				filter = "";
+				cursor = 0;
+			}
+			else if (data >= " " && !data.startsWith("\x1b")) {
+				filter += data;
+				cursor = 0;
+			}
+			refresh();
+		};
+
+		return { render, invalidate: () => (cached = undefined), handleInput };
+	});
+}
+
+/** Prompt manual metadata overrides for named model ids; blank input keeps current values. */
+async function promptOverrides(ctx: any, models: ModelChoice[], existing: Record<string, ModelOverride>): Promise<Record<string, ModelOverride>> {
+	const out: Record<string, ModelOverride> = { ...existing };
+	for (const model of models) {
+		const current = out[model.id] ?? {};
+		const patch: ModelOverride = { ...current };
+		const ctxNow = current.contextWindow ?? model.contextWindow;
+		const outNow = current.maxTokens ?? model.maxTokens;
+		const inputNow = (current.input ?? model.input ?? ["text"]).join(",");
+		const reasoningNow = current.reasoning ?? model.reasoning ?? false;
+
+		const contextWindow = await ctx.ui.input(`${model.id} — contextWindow`, String(ctxNow ?? ""));
+		if (contextWindow === undefined) return out;
+		const maxTokens = await ctx.ui.input(`${model.id} — maxTokens (max output)`, String(outNow ?? ""));
+		if (maxTokens === undefined) return out;
+		const reasoning = await ctx.ui.input(`${model.id} — reasoning (y/n)`, reasoningNow ? "y" : "n");
+		if (reasoning === undefined) return out;
+		const input = await ctx.ui.input(`${model.id} — input modalities (e.g. text,image)`, inputNow);
+		if (input === undefined) return out;
+
+		if (contextWindow.trim()) patch.contextWindow = Number(contextWindow);
+		if (maxTokens.trim()) patch.maxTokens = Number(maxTokens);
+		if (/^(y|yes|true)$/i.test(reasoning.trim())) patch.reasoning = true;
+		else if (/^(n|no|false)$/i.test(reasoning.trim())) patch.reasoning = false;
+		if (input.trim()) patch.input = normalizeModalities(input);
+
+		if (model.contextWindow && patch.contextWindow === model.contextWindow) delete patch.contextWindow;
+		if (model.maxTokens && patch.maxTokens === model.maxTokens) delete patch.maxTokens;
+		if (patch.reasoning === (model.reasoning ?? false)) delete patch.reasoning;
+		if (patch.input && patch.input.join(",") === (model.input ?? ["text"]).join(",")) delete patch.input;
+
+		if (Object.keys(patch).length > 0) out[model.id] = patch;
+		else delete out[model.id];
+	}
+	return out;
+}
+
 // ─── Factory ──────────────────────────────────────────────────────────────────
 export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): Promise<void> {
 	const agentHome = resolveAgentHome(opts);
@@ -615,8 +762,49 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	let healthTimer: ReturnType<typeof setInterval> | undefined;
 	let lastTelemetry: RouteTelemetry | undefined;
 
-	async function sync(ctx?: any): Promise<number> {
+	async function sync(ctx?: any, options: { all?: boolean } = {}): Promise<number> {
 		config = loadConfig(agentHome);
+		let changed = Boolean(options.all);
+
+		if (options.all) {
+			config = sanitizeConfig({ ...config, selectedModels: undefined });
+		} else if (ctx?.mode === "tui") {
+			const synced = await fetchSyncedModels(config);
+			const choices: ModelChoice[] = [
+				...AUTO_MODELS.map((id) => ({ id, name: id })),
+				...synced.map((m) => ({
+					id: m.id,
+					name: m.name,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					input: m.input,
+					reasoning: m.reasoning,
+				})),
+			];
+			const picked = await pickModels(ctx, choices, config.selectedModels);
+			if (picked === undefined) {
+				ctx.ui.notify("Sync cancelled.", "info");
+				return 0;
+			}
+			config = sanitizeConfig({ ...config, selectedModels: picked });
+			changed = true;
+
+			const byId = new Map(choices.map((c) => [c.id, c]));
+			const patchIds = await ctx.ui.input(
+				"Manually patch metadata for which model ids? (comma-separated, blank to skip)",
+				"",
+			);
+			if (patchIds?.trim()) {
+				const targets = patchIds
+					.split(",")
+					.map((id: string) => byId.get(id.trim()))
+					.filter((c: ModelChoice | undefined): c is ModelChoice => Boolean(c));
+				if (targets.length === 0) ctx.ui.notify("No matching model ids to patch.", "warning");
+				else config = sanitizeConfig({ ...config, modelOverrides: await promptOverrides(ctx, targets, config.modelOverrides ?? {}) });
+			}
+		}
+
+		if (changed) saveConfig(agentHome, config);
 		const models = await registerOmniProvider(pi, agentHome, config);
 		;(ctx as any)?.modelRegistry?.refresh?.();
 		ctx?.ui.notify(`OmniRoute synced ${models.length} model(s).`, "info");
@@ -804,7 +992,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 				}
 
 				if (sub === "sync") {
-					await sync(ctx);
+					await sync(ctx, { all: rest[0] === "all" });
 					return;
 				}
 

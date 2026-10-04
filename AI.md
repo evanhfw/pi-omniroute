@@ -25,8 +25,10 @@ Dual-host extension integrating OmniRoute with Pi Coding Agent and Oh My Pi. It 
 
 ## Key Functions in `shared.ts`
 
-- `loadConfig()` / `sanitizeConfig()` — backward-compatible file + environment resolution (includes `modelOverrides`).
-- `discoverModels()` — calls `/v1/models`, normalizes metadata (context, output, reasoning, effort tiers, vision), applies `modelOverrides`, and adds missing auto models.
+- `loadConfig()` / `sanitizeConfig()` — backward-compatible file + environment resolution (includes `modelOverrides`, `selectedModels`).
+- `discoverModels()` — calls `/v1/models`, normalizes metadata (context, output, reasoning, effort tiers, vision), filters to `selectedModels`, applies `modelOverrides`, and adds missing auto models.
+- `pickModels()` — TUI-only searchable multi-select returning the chosen model ids (self-contained component, no host imports).
+- `promptOverrides()` — TUI-only per-model prompts that build `modelOverrides` patches.
 - `registerOmniProvider()` — live registration plus `models.json` persistence.
 - `reloadProviderFromModelsJson()` — offline startup registration.
 - `buildProviderEntry()` — native `openai-completions` provider configuration.
