@@ -624,6 +624,23 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 // ─── Interactive model selection + manual overrides ───────────────────────────
 type ModelChoice = { id: string; name: string; contextWindow?: number; maxTokens?: number; input?: string[]; reasoning?: boolean };
 
+/** Map a decoded CSI codepoint + modifier bitmask to a plain key string. */
+function csiToKey(code: number, modifier: number): string | undefined {
+	const ctrl = (modifier & 4) !== 0;
+	if (code === 13) return "\r";
+	if (code === 27) return "\x1b";
+	if (code === 32) return ctrl ? "\x00" : " ";
+	if (code === 127 || code === 8) return "\x7f";
+	if (code === 57419) return "\x1b[A";
+	if (code === 57420) return "\x1b[B";
+	if (code === 57421) return "\x1b[5~";
+	if (code === 57422) return "\x1b[6~";
+	if (ctrl && code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+	if (ctrl && code >= 65 && code <= 90) return String.fromCharCode(code - 64);
+	if (code >= 32 && code < 127) return String.fromCharCode(code);
+	return undefined;
+}
+
 /** Self-contained multi-select with incremental filter; no host/pi-tui imports. */
 async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string[]): Promise<string[] | undefined> {
 	if (ctx.mode !== "tui" || typeof ctx.ui?.custom !== "function" || choices.length === 0) return undefined;
@@ -676,21 +693,22 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 		};
 
 		const handleInput = (data: string): void => {
-			// Normalize kitty CSI-u sequences (e.g. "\x1b[13u", "\x1b[97;5u") to plain keys.
-			const csiU = /^\x1b\[(\d+)(?:;(\d+))*(?:;[\d:]*)?u$/.exec(data);
-			if (csiU) {
-				const code = Number(csiU[1]);
-				const mods = csiU.slice(2).filter(Boolean).map(Number);
-				// Kitty modifier values are 1 + bitmask (ctrl=4); treat any ctrl bit as ctrl.
-				const ctrl = mods.some((m) => (m - 1 & 4) !== 0);
-				if (code === 13) data = "\r";
-				else if (code === 27) data = "\x1b";
-				else if (code === 32) data = " ";
-				else if (code === 127 || code === 8) data = "\x7f";
-				else if (ctrl && code >= 97 && code <= 122) data = String.fromCharCode(code - 96);
-				else if (ctrl && code >= 65 && code <= 90) data = String.fromCharCode(code - 64);
-				else if (code >= 32 && code < 127) data = String.fromCharCode(code);
+			// Kitty CSI-u: CSI key[:alts] ; mods[:event] ; text u — Ghostty sends the
+			// event type (3 = release), so parse params generically.
+			if (data.startsWith("\x1b[") && data.endsWith("u")) {
+				const parts = data.slice(2, -1).split(";");
+				const codePart = parts[0]?.split(":") ?? [];
+				const code = Number(codePart[0]);
+				const modPart = (parts[1] ?? "").split(":");
+				const modifier = modPart[0] ? Number(modPart[0]) - 1 : 0;
+				const isRelease = modPart[1] === "3";
+				if (Number.isFinite(code) && !isRelease) {
+					data = csiToKey(code, modifier) ?? data;
+				}
 			}
+			// Normalize xterm modifyOtherKeys sequences (e.g. "\x1b[27;5;97~").
+			const mok = /^\x1b\[27;(\d+);(\d+)~$/.exec(data);
+			if (mok) data = csiToKey(Number(mok[2]), Number(mok[1]) - 1) ?? data;
 			if (data === "\x1b" || data === "\x03") return done(undefined);
 			if (data === "\r" || data === "\n") return done([...checked]);
 			const items = view();
@@ -702,9 +720,10 @@ async function pickModels(ctx: any, choices: ModelChoice[], preselected?: string
 				const item = items[cursor];
 				if (item) (checked.has(item.id) ? checked.delete(item.id) : checked.add(item.id));
 			}
-			// Ctrl+combos so printable letters always go to the filter.
+			// Ctrl combos so printable letters always go to the filter. Cover legacy
+			// control bytes and the kitty space encoding (ctrl+space = NUL).
 			else if (data === "\x01") for (const item of items) checked.add(item.id);
-			else if (data === "\x0e") for (const item of items) checked.delete(item.id);
+			else if (data === "\x0e" || data === "\x00") for (const item of items) checked.delete(item.id);
 			else if (data === "\x7f" || data === "\b") {
 				filter = filter.slice(0, -1);
 				cursor = 0;
